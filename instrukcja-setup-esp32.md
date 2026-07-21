@@ -147,7 +147,170 @@ MicroPython automatycznie uruchamia plik o nazwie **`main.py`**, jeśli jest zap
 
 Od teraz płytka uruchomi logowanie samodzielnie po podłączeniu zasilania (np. z power banku), bez potrzeby podłączania laptopa.
 
-## 14. Praca z Gitem — zapisywanie postępu
+## 14. Program logujący (main.py) — kluczowe wnioski
+
+Poniższy szkielet łączy wszystkie trzy czujniki w jedną pętlę i zapisuje dane na kartę SD w formacie CSV (`timestamp_ms,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,lat,lon,gps_valid`). Dwie rzeczy w nim są krytyczne i wynikają wprost z problemów, na jakie trafiliśmy w testach:
+
+1. **Unikalne nazwy plików** — jeśli nazwiesz plik na podstawie `time.ticks_ms()` (czas od uruchomienia płytki), przy kolejnych uruchomieniach ten licznik bywa bardzo podobny, co prowadzi do **nadpisania poprzedniego loga** bez ostrzeżenia. Zamiast tego sprawdzamy przy starcie, jakie numery plików już są zajęte na karcie, i bierzemy kolejny wolny.
+2. **Odporność na błędy (`try/except`)** — bez tego pojedynczy nieoczekiwany błąd (np. zakłócona linijka NMEA z GPS) potrafi zatrzymać całą pętlę na stałe, kończąc logowanie po kilkudziesięciu sekundach zamiast po godzinach. Błędy zapisujemy do osobnego `errors.log`, żeby móc je zdiagnozować później, ale **nie przerywamy** głównej pętli.
+
+```python
+from machine import Pin, SPI, I2C, UART
+import os
+import sdcard
+import time
+
+# --- MPU6050 (I2C) ---
+MPU_ADDR = 0x68
+i2c = I2C(0, sda=Pin(21), scl=Pin(22), freq=100000)
+i2c.writeto_mem(MPU_ADDR, 0x6B, b'\x00')
+
+def read_word(reg):
+    high = i2c.readfrom_mem(MPU_ADDR, reg, 1)[0]
+    low = i2c.readfrom_mem(MPU_ADDR, reg + 1, 1)[0]
+    value = (high << 8) | low
+    if value >= 0x8000:
+        value -= 0x10000
+    return value
+
+# --- GPS (UART) ---
+gps_uart = UART(1, baudrate=9600, rx=16, tx=17, timeout=100)
+gps_buffer = b""
+last_lat = None
+last_lon = None
+gps_valid = False
+
+def update_gps():
+    global gps_buffer, last_lat, last_lon, gps_valid
+    try:
+        if gps_uart.any():
+            gps_buffer += gps_uart.read()
+            while b"\n" in gps_buffer:
+                line, gps_buffer = gps_buffer.split(b"\n", 1)
+                try:
+                    line = line.decode("ascii", "ignore").strip()
+                    if line.startswith("$GPRMC"):
+                        parts = line.split(",")
+                        if len(parts) > 6 and parts[2] == "A":
+                            lat_raw, lat_dir = parts[3], parts[4]
+                            lon_raw, lon_dir = parts[5], parts[6]
+                            if lat_raw and lon_raw:
+                                lat = float(lat_raw[:2]) + float(lat_raw[2:]) / 60
+                                if lat_dir == "S":
+                                    lat = -lat
+                                lon = float(lon_raw[:3]) + float(lon_raw[3:]) / 60
+                                if lon_dir == "W":
+                                    lon = -lon
+                                last_lat, last_lon = lat, lon
+                                gps_valid = True
+                except Exception:
+                    pass  # pojedyncza uszkodzona linijka NMEA - pomijamy
+    except Exception:
+        pass  # blad na poziomie UART - rowniez pomijamy
+
+# --- SD (SPI) ---
+spi = SPI(1, baudrate=1000000, sck=Pin(18), mosi=Pin(23), miso=Pin(19))
+cs = Pin(5)
+sd = sdcard.SDCard(spi, cs)
+os.mount(sd, "/sd")
+
+# unikalna nazwa pliku - sprawdzamy jaki numer jest juz zajety
+existing = os.listdir("/sd")
+next_num = 1
+while "log_{:04d}.csv".format(next_num) in existing:
+    next_num += 1
+log_filename = "/sd/log_{:04d}.csv".format(next_num)
+
+with open(log_filename, "w") as f:
+    f.write("timestamp_ms,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,lat,lon,gps_valid\n")
+
+print("Logowanie do pliku:", log_filename)
+
+buffer = []
+BUFFER_FLUSH_SIZE = 20   # zapis na SD co ok. 2 sekundy przy 10Hz
+SAMPLE_INTERVAL_MS = 100  # 10 odczytow na sekunde
+
+last_sample_time = time.ticks_ms()
+
+while True:
+    try:
+        now = time.ticks_ms()
+        if time.ticks_diff(now, last_sample_time) >= SAMPLE_INTERVAL_MS:
+            last_sample_time = now
+
+            accel_x = read_word(0x3B)
+            accel_y = read_word(0x3D)
+            accel_z = read_word(0x3F)
+            gyro_x = read_word(0x43)
+            gyro_y = read_word(0x45)
+            gyro_z = read_word(0x47)
+
+            row = "{},{},{},{},{},{},{},{},{},{}".format(
+                now, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z,
+                last_lat if last_lat is not None else "",
+                last_lon if last_lon is not None else "",
+                1 if gps_valid else 0
+            )
+            buffer.append(row)
+
+            if len(buffer) >= BUFFER_FLUSH_SIZE:
+                with open(log_filename, "a") as f:
+                    f.write("\n".join(buffer) + "\n")
+                buffer = []
+
+        update_gps()
+    except Exception as e:
+        try:
+            with open("/sd/errors.log", "a") as ef:
+                ef.write("{}: {}\n".format(time.ticks_ms(), str(e)))
+        except Exception:
+            pass
+        time.sleep_ms(100)
+```
+
+Zapisz jako `main.py` na **"MicroPython device"** (żeby uruchamiało się automatycznie po podłączeniu zasilania), i tak samo lokalnie w folderze projektu do repo.
+
+## 15. Odczyt logów z karty SD po teście
+
+Przy odczycie plików na ESP32 **nigdy nie używaj `f.readlines()` na dużym pliku** — to próbuje wczytać cały plik do pamięci RAM naraz, a ESP32 ma jej bardzo mało; przy dłuższych logach (tysiące wierszy) skończy się to błędem `MemoryError`. Zamiast tego czytaj plik linijka po linijce w pętli `for line in f:`:
+
+```python
+from machine import Pin, SPI
+import os, sdcard
+
+spi = SPI(1, baudrate=1000000, sck=Pin(18), mosi=Pin(23), miso=Pin(19))
+cs = Pin(5)
+sd = sdcard.SDCard(spi, cs)
+os.mount(sd, "/sd")
+print(os.listdir("/sd"))
+
+def count_and_peek(filename):
+    count = 0
+    first_line = None
+    last_line = None
+    with open("/sd/" + filename) as f:
+        for line in f:
+            count += 1
+            if count == 2:
+                first_line = line.strip()
+            last_line = line.strip()
+    print(filename, "-> wierszy:", count)
+    if first_line:
+        print("   pierwszy:", first_line)
+    if last_line:
+        print("   ostatni: ", last_line)
+```
+
+Praktyczniejsza opcja przy większej ilości danych: wyjmij samą kartę SD z modułu i odczytaj ją bezpośrednio czytnikiem w komputerze — dużo szybsze niż odczyt przez wolne połączenie szeregowe ESP32↔Thonny.
+
+> **Uwaga:** podłączenie płytki do komputera przez Thonny samo w sobie wykonuje reset (soft reboot), co automatycznie uruchamia `main.py` na nowo — może to stworzyć dodatkowy, bardzo krótki plik logu. To normalne zachowanie, nie błąd.
+
+## 16. Wnioski z testów w terenie
+
+- **Antena GPS potrzebuje swobodnego widoku nieba, skierowana ku górze.** Test, w którym moduł leżał przy plecach/biodrze pod ubraniem, nie złapał namiaru przez cały ~50-sekundowy test mimo bycia na zewnątrz. Test z anteną leżącą płasko, skierowaną w niebo (na balkonie) złapał i utrzymał stabilny fix przez cały ~17-minutowy przebieg.
+- **Tanie power banki mogą wyłączać się automatycznie przy zbyt niskim poborze prądu** — układ ESP32+czujniki pobiera niewiele energii, więc warto to mieć na uwadze przy dłuższych testach/projektowaniu zasilania docelowego.
+
+## 17. Praca z Gitem — zapisywanie postępu
 
 Po każdym większym kroku (nowy działający skrypt, ważna poprawka):
 
