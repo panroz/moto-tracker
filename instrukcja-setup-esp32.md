@@ -10,6 +10,59 @@ Ta instrukcja zakłada nowy komputer z systemem Windows, na którym nic jeszcze 
 
 ---
 
+## Lista podzespołów
+
+| # | Podzespół | Opis |
+|---|---|---|
+| 1 | ESP32-WROOM-32S DevKit | 30-pin, Type-C, chip D0WD/D0WDQ6 |
+| 2 | GY-521 (MPU6050) | 3-osiowy żyroskop + akcelerometr, I2C |
+| 3 | GY-GPSU3-NEO (NEO-7M) | Moduł GPS, UART |
+| 4 | Moduł karty microSD | Interfejs SPI |
+| 5 | TP4056 | Moduł ładowania baterii Li-ion, USB Type-C, 1A, z ochroną |
+| 6 | MT3608 | Moduł boost DC-DC 2A (podwyższanie napięcia z baterii do 5V) |
+| 7 | Bateria XHZ 104050 | Li-ion 3.7V, 2500mAh |
+| 8 | Metalowy przycisk z zatrzaskiem | Podświetlana obwódka (symbol power), 5 przewodów — 2 do styku przełącznika, 3 do LED |
+
+## Schemat podłączenia do ESP32
+
+**Czujniki i karta SD:**
+
+| Podzespół | Pin podzespołu | Pin ESP32 |
+|---|---|---|
+| MPU6050 (I2C) | VCC | 3V3 |
+| | GND | GND |
+| | SDA | GPIO21 |
+| | SCL | GPIO22 |
+| GPS NEO-7M (UART) | VCC | 3V3 |
+| | GND | GND |
+| | TX | GPIO16 (RX) |
+| | RX | GPIO17 (TX) |
+| Moduł microSD (SPI) | 3V3 / VCC | 3V3 *(nie 5V — sprawdź oznaczenie na module)* |
+| | GND | GND |
+| | CS | GPIO5 |
+| | MOSI | GPIO23 |
+| | CLK / SCK | GPIO18 |
+| | MISO | GPIO19 |
+| Przycisk start/stop | czarny (styk) | GND |
+| | czerwony (styk) | GPIO4 |
+
+> Zielony/niebieski/żółty przewód przycisku (LED podświetlenia) — do podłączenia przy montażu finalnym, nie są potrzebne do samej funkcji start/stop.
+
+**Łańcuch zasilania (bateria → ESP32):**
+
+```
+Bateria Li-ion 3.7V (XHZ 104050)
+    → TP4056 (ładowanie przez Type-C + ochrona)
+    → MT3608 (boost 3.7V → 5V)
+    → ESP32 pin VIN (5V) lub VUSB
+```
+
+> Uwaga: MT3608 pobiera prąd stale, nawet gdy ESP32 jest w trybie uśpienia — ma to znaczenie przy planowaniu czasu pracy na baterii.
+
+Wszystkie piny w tabeli powyżej zostały praktycznie zweryfikowane (skan I2C, testy UART/SPI, pomiary multimetrem) na naszym zestawie. Jeśli montujesz nowy egzemplarz, warto to i tak zweryfikować samodzielnie, zamiast zakładać identyczne okablowanie.
+
+---
+
 ## 1. Instalacja Thonny (środowisko do programowania w Pythonie)
 
 1. Wejdź na https://thonny.org
